@@ -20,10 +20,10 @@ from .helpers import (
     console,
     err_console,
     format_alpha,
-    load_config,
     print_error,
     print_network_header,
     print_success,
+    resolve_wallet_args,
     validate_bounty_amount,
     validate_github_issue,
     validate_repository,
@@ -139,7 +139,7 @@ def issue_register(
         rpc_url,
         missing_contract_message='Contract address not configured. Run ./up.sh --issues to deploy the contract first.',
     )
-    config = load_config()
+    effective_wallet, effective_hotkey = resolve_wallet_args(wallet_name, wallet_hotkey)
 
     # Validate inputs before showing summary. The register path is owner-only
     # and spends real ALPHA, so both GitHub probes run in strict mode: any
@@ -183,10 +183,6 @@ def issue_register(
 
         with err_console.status('[bold cyan]Connecting to network...', spinner='dots'):
             subtensor = bt.Subtensor(network=ws_endpoint)
-
-        # CLI flags override config; fall back to config if not explicitly supplied
-        effective_wallet = wallet_name if wallet_name != 'default' else config.get('wallet', wallet_name)
-        effective_hotkey = wallet_hotkey if wallet_hotkey != 'default' else config.get('hotkey', wallet_hotkey)
 
         # For local development, check config first, then fall back to //Alice
         if network_name.lower() == 'local' and effective_wallet == 'default' and effective_hotkey == 'default':
@@ -292,9 +288,12 @@ def issue_harvest(wallet_name: str, wallet_hotkey: str, network: str, rpc_url: s
         rpc_url,
         missing_contract_message='Contract address not configured. Set CONTRACT_ADDRESS env var or run ./up.sh --issues.',
     )
+    effective_wallet, effective_hotkey = resolve_wallet_args(
+        wallet_name, wallet_hotkey, wallet_default='validator', hotkey_default='default'
+    )
 
     print_network_header(network_name, contract_addr)
-    err_console.print(f'[dim]Wallet: {wallet_name}/{wallet_hotkey}[/dim]\n')
+    err_console.print(f'[dim]Wallet: {effective_wallet}/{effective_hotkey}[/dim]\n')
 
     try:
         import bittensor as bt
@@ -304,7 +303,7 @@ def issue_harvest(wallet_name: str, wallet_hotkey: str, network: str, rpc_url: s
         )
 
         with err_console.status('[bold cyan]Loading wallet...', spinner='dots'):
-            wallet = bt.Wallet(name=wallet_name, hotkey=wallet_hotkey)
+            wallet = bt.Wallet(name=effective_wallet, hotkey=effective_hotkey)
             hotkey_addr = wallet.hotkey.ss58_address
         err_console.print(f'[green]Hotkey address:[/green] {hotkey_addr}')
 

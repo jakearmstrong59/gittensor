@@ -27,6 +27,7 @@ from gittensor.cli.issue_commands.helpers import (
     STATUS_COLORS,
     colorize_status,
     format_alpha,
+    resolve_wallet_args,
     validate_bounty_amount,
     validate_github_issue,
     validate_repository,
@@ -919,3 +920,225 @@ class TestEmitJson:
         captured = capsys.readouterr()
         parsed = json.loads(captured.out)
         assert parsed['field'] == str(value)
+
+
+class TestResolveWalletArgs:
+    """Priority CLI > ~/.gittensor/config.json > option default."""
+
+    def test_cli_value_overrides_config(self):
+        with patch(
+            'gittensor.cli.issue_commands.helpers.load_config',
+            return_value={'wallet': 'configwallet', 'hotkey': 'confighotkey'},
+        ):
+            wallet, hotkey = resolve_wallet_args('cliwallet', 'clihotkey')
+        assert wallet == 'cliwallet'
+        assert hotkey == 'clihotkey'
+
+    def test_config_fills_in_when_cli_is_default_sentinel(self):
+        with patch(
+            'gittensor.cli.issue_commands.helpers.load_config',
+            return_value={'wallet': 'configwallet', 'hotkey': 'confighotkey'},
+        ):
+            wallet, hotkey = resolve_wallet_args('default', 'default')
+        assert wallet == 'configwallet'
+        assert hotkey == 'confighotkey'
+
+    def test_falls_back_to_default_when_config_empty(self):
+        with patch('gittensor.cli.issue_commands.helpers.load_config', return_value={}):
+            wallet, hotkey = resolve_wallet_args('default', 'default')
+        assert wallet == 'default'
+        assert hotkey == 'default'
+
+    def test_mixed_resolution(self):
+        with patch(
+            'gittensor.cli.issue_commands.helpers.load_config',
+            return_value={'wallet': 'configwallet', 'hotkey': 'confighotkey'},
+        ):
+            wallet, hotkey = resolve_wallet_args('cliwallet', 'default')
+        assert wallet == 'cliwallet'
+        assert hotkey == 'confighotkey'
+
+    def test_harvest_sentinel_validator(self):
+        """harvest's --wallet-name defaults to 'validator', not 'default'."""
+        with patch(
+            'gittensor.cli.issue_commands.helpers.load_config',
+            return_value={'wallet': 'myname', 'hotkey': 'myhotkey'},
+        ):
+            wallet, hotkey = resolve_wallet_args(
+                'validator', 'default', wallet_default='validator', hotkey_default='default'
+            )
+        assert wallet == 'myname'
+        assert hotkey == 'myhotkey'
+
+    def test_harvest_sentinel_keeps_explicit_cli_value(self):
+        with patch(
+            'gittensor.cli.issue_commands.helpers.load_config',
+            return_value={'wallet': 'myname', 'hotkey': 'myhotkey'},
+        ):
+            wallet, hotkey = resolve_wallet_args(
+                'somethingelse', 'otherhotkey', wallet_default='validator', hotkey_default='default'
+            )
+        assert wallet == 'somethingelse'
+        assert hotkey == 'otherhotkey'
+
+    def test_partial_config(self):
+        """Missing key in config falls back to the option default."""
+        with patch(
+            'gittensor.cli.issue_commands.helpers.load_config',
+            return_value={'wallet': 'configwallet'},
+        ):
+            wallet, hotkey = resolve_wallet_args('default', 'default')
+        assert wallet == 'configwallet'
+        assert hotkey == 'default'
+
+
+class TestConfigWalletHotkeyPriority:
+    """End-to-end: vote / admin / harvest honor config wallet/hotkey (regression for the fix)."""
+
+    _CONTRACT_AND_NETWORK = (
+        '0x1234567890123456789012345678901234567890',
+        'wss://entrypoint-finney.opentensor.ai:443',
+        'finney',
+    )
+
+    def _captured_wallet_call(self, mock_wallet):
+        assert mock_wallet.called, 'bittensor.Wallet was never constructed'
+        return mock_wallet.call_args.kwargs
+
+    def test_make_contract_client_honors_config_wallet(self):
+        from gittensor.cli.issue_commands import helpers as h
+
+        with (
+            patch.object(h, 'load_config', return_value={'wallet': 'configwallet', 'hotkey': 'confighotkey'}),
+            patch('bittensor.Wallet') as mock_wallet,
+            patch('bittensor.Subtensor'),
+            patch('gittensor.validator.issue_competitions.contract_client.IssueCompetitionContractClient'),
+        ):
+            h._make_contract_client('5FakeContract', 'wss://localhost', 'default', 'default')
+        kw = mock_wallet.call_args.kwargs
+        assert kw['name'] == 'configwallet'
+        assert kw['hotkey'] == 'confighotkey'
+
+    def test_make_contract_client_cli_overrides_config(self):
+        from gittensor.cli.issue_commands import helpers as h
+
+        with (
+            patch.object(h, 'load_config', return_value={'wallet': 'configwallet', 'hotkey': 'confighotkey'}),
+            patch('bittensor.Wallet') as mock_wallet,
+            patch('bittensor.Subtensor'),
+            patch('gittensor.validator.issue_competitions.contract_client.IssueCompetitionContractClient'),
+        ):
+            h._make_contract_client('5FakeContract', 'wss://localhost', 'cliwallet', 'clihotkey')
+        kw = mock_wallet.call_args.kwargs
+        assert kw['name'] == 'cliwallet'
+        assert kw['hotkey'] == 'clihotkey'
+
+    def test_admin_cancel_uses_config_wallet(self, cli_root, runner):
+        with (
+            patch(
+                'gittensor.cli.issue_commands.admin._resolve_contract_and_network',
+                return_value=self._CONTRACT_AND_NETWORK,
+            ),
+            patch(
+                'gittensor.cli.issue_commands.helpers.load_config',
+                return_value={'wallet': 'configwallet', 'hotkey': 'confighotkey'},
+            ),
+            patch('bittensor.Wallet') as mock_wallet,
+            patch('bittensor.Subtensor'),
+            patch(
+                'gittensor.validator.issue_competitions.contract_client.IssueCompetitionContractClient'
+            ) as mock_client_cls,
+        ):
+            mock_client_cls.return_value.cancel_issue.return_value = True
+            runner.invoke(cli_root, ['admin', 'cancel-issue', '1', '--yes'], catch_exceptions=False)
+        kw = self._captured_wallet_call(mock_wallet)
+        assert kw['name'] == 'configwallet'
+        assert kw['hotkey'] == 'confighotkey'
+
+    def test_vote_solution_uses_config_wallet(self, cli_root, runner):
+        with (
+            patch(
+                'gittensor.cli.issue_commands.vote._resolve_contract_and_network',
+                return_value=self._CONTRACT_AND_NETWORK,
+            ),
+            patch(
+                'gittensor.cli.issue_commands.helpers.load_config',
+                return_value={'wallet': 'configwallet', 'hotkey': 'confighotkey'},
+            ),
+            patch('bittensor.Wallet') as mock_wallet,
+            patch('bittensor.Subtensor'),
+            patch(
+                'gittensor.validator.issue_competitions.contract_client.IssueCompetitionContractClient'
+            ) as mock_client_cls,
+        ):
+            mock_client_cls.return_value.vote_solution.return_value = True
+            runner.invoke(
+                cli_root,
+                [
+                    'vote',
+                    'solution',
+                    '1',
+                    '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY',
+                    '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY',
+                    '1',
+                    '--yes',
+                ],
+                catch_exceptions=False,
+            )
+        kw = self._captured_wallet_call(mock_wallet)
+        assert kw['name'] == 'configwallet'
+        assert kw['hotkey'] == 'confighotkey'
+
+    def test_harvest_uses_config_wallet(self, cli_root, runner):
+        with (
+            patch(
+                'gittensor.cli.issue_commands.mutations._resolve_contract_and_network',
+                return_value=self._CONTRACT_AND_NETWORK,
+            ),
+            patch(
+                'gittensor.cli.issue_commands.helpers.load_config',
+                return_value={'wallet': 'myname', 'hotkey': 'myhotkey'},
+            ),
+            patch('bittensor.Wallet') as mock_wallet,
+            patch('bittensor.Subtensor'),
+            patch(
+                'gittensor.validator.issue_competitions.contract_client.IssueCompetitionContractClient'
+            ) as mock_client_cls,
+        ):
+            mock_client_cls.return_value.harvest_emissions.return_value = {
+                'status': 'success',
+                'tx_hash': '0xdeadbeef',
+            }
+            runner.invoke(cli_root, ['harvest'], catch_exceptions=False)
+        kw = self._captured_wallet_call(mock_wallet)
+        assert kw['name'] == 'myname'
+        assert kw['hotkey'] == 'myhotkey'
+
+    def test_harvest_cli_overrides_config(self, cli_root, runner):
+        with (
+            patch(
+                'gittensor.cli.issue_commands.mutations._resolve_contract_and_network',
+                return_value=self._CONTRACT_AND_NETWORK,
+            ),
+            patch(
+                'gittensor.cli.issue_commands.helpers.load_config',
+                return_value={'wallet': 'configwallet', 'hotkey': 'confighotkey'},
+            ),
+            patch('bittensor.Wallet') as mock_wallet,
+            patch('bittensor.Subtensor'),
+            patch(
+                'gittensor.validator.issue_competitions.contract_client.IssueCompetitionContractClient'
+            ) as mock_client_cls,
+        ):
+            mock_client_cls.return_value.harvest_emissions.return_value = {
+                'status': 'success',
+                'tx_hash': '0xdeadbeef',
+            }
+            runner.invoke(
+                cli_root,
+                ['harvest', '--wallet-name', 'cliwallet', '--wallet-hotkey', 'clihotkey'],
+                catch_exceptions=False,
+            )
+        kw = self._captured_wallet_call(mock_wallet)
+        assert kw['name'] == 'cliwallet'
+        assert kw['hotkey'] == 'clihotkey'

@@ -526,6 +526,36 @@ def load_config() -> Dict[str, Any]:
     return {}
 
 
+def resolve_wallet_args(
+    wallet_name: str,
+    wallet_hotkey: str,
+    *,
+    wallet_default: str = 'default',
+    hotkey_default: str = 'default',
+) -> Tuple[str, str]:
+    """Resolve --wallet-name / --wallet-hotkey using CLI → config → default priority.
+
+    Matches the documented priority in load_config and the local precedent in
+    issue_register (mutations.py). A CLI value equal to its option default is
+    treated as "not explicitly supplied" and falls through to config: the Click
+    sentinel pattern cannot distinguish explicit `--wallet-name default` from
+    the option default, so an explicit-default override won't beat config.
+
+    Args:
+        wallet_name: --wallet-name option value (possibly the option default).
+        wallet_hotkey: --wallet-hotkey option value (possibly the option default).
+        wallet_default: Sentinel meaning "no explicit CLI value" for wallet name.
+        hotkey_default: Sentinel meaning "no explicit CLI value" for hotkey.
+
+    Returns:
+        (effective_wallet, effective_hotkey) — values to hand to bt.Wallet(...).
+    """
+    config = load_config()
+    effective_wallet = wallet_name if wallet_name != wallet_default else config.get('wallet', wallet_name)
+    effective_hotkey = wallet_hotkey if wallet_hotkey != hotkey_default else config.get('hotkey', wallet_hotkey)
+    return effective_wallet, effective_hotkey
+
+
 def get_contract_address(cli_value: str = '') -> str:
     """
     Get contract address. CLI arg > env var > constants.py default.
@@ -778,6 +808,9 @@ def _read_issues_from_child_storage(substrate, contract_addr: str, verbose: bool
 def _make_contract_client(contract_addr: str, ws_endpoint: str, wallet_name: str, wallet_hotkey: str):
     """Instantiate a wallet and IssueCompetitionContractClient from CLI args.
 
+    Honors ~/.gittensor/config.json `wallet` / `hotkey` when the caller passes
+    the option defaults (CLI > config > default — see resolve_wallet_args).
+
     Returns (wallet, client). Lazy-imports bittensor and the contract client so
     that the top-level CLI remains importable without those heavy dependencies.
     """
@@ -787,7 +820,8 @@ def _make_contract_client(contract_addr: str, ws_endpoint: str, wallet_name: str
         IssueCompetitionContractClient,
     )
 
-    wallet = bt.Wallet(name=wallet_name, hotkey=wallet_hotkey)
+    effective_wallet, effective_hotkey = resolve_wallet_args(wallet_name, wallet_hotkey)
+    wallet = bt.Wallet(name=effective_wallet, hotkey=effective_hotkey)
     subtensor = bt.Subtensor(network=ws_endpoint)
     client = IssueCompetitionContractClient(
         contract_address=contract_addr,
